@@ -9,15 +9,13 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/pinterb/common/middleware"
+	"github.com/pinterb/common/signals"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
-	
-	"github.com/pinterb/common/signals"
 
-	"github.com/go-kit/kit/metrics/prometheus"
 	"github.com/pkg/errors"
-	stdprometheus "github.com/prometheus/client_golang/prometheus"
-	"github.com/go-kit/kit/log"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Config for a Server
@@ -58,18 +56,28 @@ type Server struct {
 	GRPC *grpc.Server
 }
 
+// RegisterFlags adds the flags required to config this to the given FlagSet
+func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
+	f.IntVar(&cfg.HTTPListenPort, "server.http-listen-port", 80, "HTTP server listen port.")
+	f.IntVar(&cfg.GRPCListenPort, "server.grpc-listen-port", 9095, "gRPC server listen port.")
+	f.BoolVar(&cfg.RegisterInstrumentation, "server.register-instrumentation", true, "Register the intrumentation handlers (/metrics etc).")
+	f.DurationVar(&cfg.ServerGracefulShutdownTimeout, "server.graceful-shutdown-timeout", 5*time.Second, "Timeout for graceful shutdowns")
+	f.DurationVar(&cfg.HTTPServerReadTimeout, "server.http-read-timeout", 5*time.Second, "Read timeout for HTTP server")
+	f.DurationVar(&cfg.HTTPServerWriteTimeout, "server.http-write-timeout", 5*time.Second, "Write timeout for HTTP server")
+	f.DurationVar(&cfg.HTTPServerIdleTimeout, "server.http-idle-timeout", 120*time.Second, "Idle timeout for HTTP server")
+}
 
 // New makes a new Server
 func New(cfg Config, logger Logger) (*Server, error) {
 	// Setup listeners first, so we can fail early if the port is in use.
 	httpListener, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.HTTPListenPort))
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "New Server")
 	}
 
 	grpcListener, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.GRPCListenPort))
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "New Server")
 	}
 
 	grpcOptions := []grpc.ServerOption{}
@@ -82,6 +90,8 @@ func New(cfg Config, logger Logger) (*Server, error) {
 		RegisterInstrumentation(router)
 	}
 
+	httpMiddleware := []middleware.Interface{}
+	httpMiddleware = append(httpMiddleware, cfg.HTTPMiddleware...)
 	httpServer := &http.Server{
 		ReadTimeout:  cfg.HTTPServerReadTimeout,
 		WriteTimeout: cfg.HTTPServerWriteTimeout,
@@ -112,9 +122,6 @@ func RegisterInstrumentation(router *mux.Router) {
 func (s *Server) Run() {
 	go s.httpServer.Serve(s.httpListener)
 
-	// Setup gRPC server
-	// for HTTP over gRPC, ensure we don't double-count the middleware
-	httpgrpc.RegisterHTTPServer(s.GRPC, httpgrpc_server.NewServer(s.HTTP))
 	go s.GRPC.Serve(s.grpcListener)
 	defer s.GRPC.GracefulStop()
 
